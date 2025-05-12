@@ -281,17 +281,17 @@ def load_and_process_gdp_and_population():
     df_gdp["GDP_per_capita_PPP"] = pd.to_numeric(df_gdp["GDP_per_capita_PPP"], errors='coerce')
     df_pop["Population"] = pd.to_numeric(df_pop["Population"], errors='coerce')
 
-    df_gdp.to_csv("output/gdp before sort.csv", index=False)
-    df_pop.to_csv("output/pop before sort.csv", index=False)
+    df_gdp.to_csv("output/gdp_before_sort.csv", index=False)
+    df_pop.to_csv("output/pop_before_sort.csv", index=False)
 
     df_gdp_sorted = df_gdp.sort_values("Country")
     df_pop_sorted = df_pop.sort_values("Country")
 
-    df_gdp_sorted.to_csv("output/gdp after sort.csv", index=False)
-    df_pop_sorted.to_csv("output/pop after sort.csv", index=False)
+    df_gdp_sorted.to_csv("output/gdp_after_sort.csv", index=False)
+    df_pop_sorted.to_csv("output/pop_after_sort.csv", index=False)
 
-    df_gdp.describe().to_csv("output/gdp describe.csv")
-    df_pop.describe().to_csv("output/pop describe.csv")
+    df_gdp.describe().to_csv("output/gdp_describe.csv")
+    df_pop.describe().to_csv("output/pop_describe.csv")
 
     print("\nGDP DataFrame:")
     print("Before sorting:")
@@ -336,7 +336,7 @@ def crawl_demographics():
     if not os.path.exists("output"):
         os.makedirs("output")
 
-    df.to_csv("output/demographics before sort.csv", index=False)
+    df.to_csv("output/demographics_before_sort.csv", index=False)
     print("\nFirst 10 rows before sorting:")
     print(df.head(10))
 
@@ -344,8 +344,8 @@ def crawl_demographics():
     print("\nFirst 10 rows after sorting:")
     print(df_sorted.head(10))
 
-    df_sorted.to_csv("output/demographics after sort.csv", index=False)
-    df_sorted.to_csv("output/demographics data.csv", index=False)
+    df_sorted.to_csv("output/demographics_after_sort.csv", index=False)
+    df_sorted.to_csv("output/demographics_data.csv", index=False)
 
     global df_demographics
     df_demographics = df_sorted  # So other functions can access it

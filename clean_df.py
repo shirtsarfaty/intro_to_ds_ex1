@@ -1,173 +1,312 @@
-
 #!/usr/bin/env python3
 """
-clean_df.py
-===============
+clean_pipeline.py
+=================
+Cleans all three datasets required by Sections 4.1 – 4.3:
 
-Utility script that cleans a *GDP‑per‑capita (PPP)* dataset according to the
-specification in Section4.2 of the assignment:
+    • Demographics        →  cleaned_demographics.csv
+    • GDP per capita PPP  →  cleaned_gdp.csv         (+ dropped_gdp.csv)
+    • Population          →  cleaned_population.csv  (+ dropped_population.csv)
 
-    a. Ensure the GDP column is numeric (remove commas, symbols, etc.).
-    b. Drop rows whose GDP is missing (None/NaN) and log them.
-    c. Identify Tukey outliers (values < Q1–1.5·IQR or >Q3+1.5·IQR).
-       • Only *report* their count – do **not** remove them.
-    d. Handle duplicate country names (policy: keep first|last|mean).
-    e. Apply the same country‑name mapping used for the demographics dataset.
-    f. Set Country as the DataFrame index and write the cleaned CSV.
-
+Country-name harmonisation is learned from the demographics step and
+re-used for GDP and Population.  All paths are hard-coded near the top.
 Run:
 
-    python clean_df.py --input gdp_per_capita_2021.csv
-
-Optional flags:
-
-    --output-dir           Where to place cleaned & dropped CSVs (default: output)
-    --name-map             CSV with 2 columns (raw,canonical) for harmonising names
-    --duplicate-policy     first | last | mean  (default: first)
-
-The cleaned file is saved as  <output‑dir>/cleaned_gdp.csv
-Rows dropped due to missing GDP go to <output‑dir>/dropped_gdp.csv
+    python clean_pipeline.py
 """
 from __future__ import annotations
-import argparse
+
 from pathlib import Path
+from typing import Dict, Tuple
+import re
+import numpy as np
 import pandas as pd
 
+# ────────────────────────────────────────────────────────────────────────────────
+# Hard-coded paths  (edit BASE if your folder moves)
+# ────────────────────────────────────────────────────────────────────────────────
+BASE = Path(r"C:\Josh\Hebrew University\Year2\Intro To Data Science\Exercises\intro_to_ds_ex1")
+
+DEMOG_INPUT = BASE / r"output\demographics_data.csv"
+GDP_INPUT = BASE / "gdp_per_capita_2021.csv"
+POP_INPUT = BASE / "population_2021.csv"  # ← new
+
+DEMOG_CLEAN = BASE / r"output\cleaned_demographics.csv"
+GDP_CLEAN = BASE / r"output\cleaned_gdp.csv"
+POP_CLEAN = BASE / r"output\cleaned_population.csv"  # ← new
+
+GDP_DROPPED = BASE / r"output\dropped_gdp.csv"
+POP_DROPPED = BASE / r"output\dropped_population.csv"  # ← new
+NAME_MISMATCH = BASE / r"output\name_mismatches.csv"
+
 GDP_COL = "GDP_per_capita_PPP"
+POP_COL = "Population"  # ← expected column name
 
 
-# ---------------------------------------------------------------------------
-# Core logic
-# ---------------------------------------------------------------------------
-def clean_gdp(
-    input_path: Path,
-    output_clean_path: Path,
-    output_dropped_path: Path,
-    country_name_mapping: dict[str, str] | None = None,
-    duplicate_policy: str = "first",
-) -> pd.DataFrame:
-    """Clean a GDP‑per‑capita CSV and return the resulting DataFrame.
+# ────────────────────────────────────────────────────────────────────────────────
+# Utility helpers
+# ────────────────────────────────────────────────────────────────────────────────
+def _numericise(df: pd.DataFrame, cols: Tuple[str, ...]) -> None:
+    """Convert listed columns to float in-place, coercing errors to NaN."""
+    for c in cols:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c].astype(str).str.replace(",", ""), errors="coerce")
 
-    Parameters
-    ----------
-    input_path
-        Raw CSV containing at least 'Country' and GDP column.
-    output_clean_path
-        Destination CSV for the cleaned DataFrame.
-    output_dropped_path
-        Destination CSV for rows removed because GDP was missing.
-    country_name_mapping
-        Mapping from raw → canonical country names to harmonise datasets.
-    duplicate_policy
-        How to handle duplicate country entries:
-        • 'first'  – keep the first row
-        • 'last'   – keep the last row
-        • 'mean'   – keep the mean GDP value of duplicates
+
+# ────────────────────────────────────────────────────────────────────────────────
+# Country-name normalisation & row-filter helper
+# ────────────────────────────────────────────────────────────────────────────────
+_SPECIAL_REPLACEMENTS: dict[str, str] = {
+    # spelling / synonym fixes so GDP & POP match Demographics
+    "Cape Verde": "Cabo Verde",
+    "Czechia": "Czech Republic (Czechia)",
+    "Swaziland": "Eswatini",
+    "East Timor": "Timor-Leste",
+    "Saint Vincent And The Grenadines": "St. Vincent & Grenadines",
+    "Saint Vincent and The Grenadines": "St. Vincent & Grenadines",
+    "United States Virgin Islands": "U.S. Virgin Islands",
+    "Sao Tome and Principe": "Sao Tome & Principe",
+    "Sao Tome And Principe": "Sao Tome & Principe",
+    "Palestine": "State Of Palestine",
+    "Cote D'Ivoire": "Côte d'Ivoire",
+    "Reunion": "Réunion",
+    "Democratic Republic Of Congo": "DR Congo",
+    "Curacao": "Curaçao",
+}
+
+_CONTINENT_KEYWORDS = (
+    "Africa", "America", "Asia", "Europe",
+    "Income", "World", "Un)", "(Wb", "\d"
+)
+
+
+def _normalise_country_series(s: pd.Series) -> pd.Series:
     """
-    # 1. Read
-    df = pd.read_csv(input_path)
+    Strip whitespace, drop leading 'the ', Title-Case, then apply the special
+    replacements table.  Returns the cleaned Series.
+    """
+    s = s.astype(str).str.strip()
+    s = s.str.replace(r"\s*\(country\)$", "", regex=True, flags=re.I)
+    s = s.str.replace(r"^the\s+", "", regex=True, flags=re.I).str.title()
+    s = s.replace(_SPECIAL_REPLACEMENTS)
+    return s
 
-    # 2. GDP to numeric (strip commas, currency symbols, spaces, etc.)
+
+def _drop_non_country_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Removes rows whose Country contains continent-level totals, income groups,
+    'World', 'UN)', or stray newlines (\n) from the web-crawled sources.
+    """
+    # Escape each keyword so any special char (like ')') is treated literally:
+    escaped = [re.escape(k) for k in _CONTINENT_KEYWORDS]
+    # Prepend the newline check, then OR-join them into one pattern:
+    pattern = r"\n|" + "|".join(escaped)
+
+    mask_bad = df["Country"].str.contains(
+        pattern,
+        case=False,
+        na=False,
+        regex=True
+    )
+    return df.loc[~mask_bad].copy()
+
+
+# ────────────────────────────────────────────────────────────────────────────────
+# 4 .1  Demographics
+# ────────────────────────────────────────────────────────────────────────────────
+def clean_demographics() -> Tuple[pd.DataFrame, Dict[str, str]]:
+    print("▶ Cleaning demographics …")
+    df = pd.read_csv(DEMOG_INPUT)
+
+    # numeric columns
+    numeric_cols = tuple(c for c in df.columns if c != "Country")
+    _numericise(df, numeric_cols)
+
+    # remove continent / income / World rows
+    df = _drop_non_country_rows(df)
+
+    # standardise country names + special spelling fixes
+    df["Country_raw"] = df["Country"]
+    df["Country"] = _normalise_country_series(df["Country_raw"])
+
+    # drop invalid life-expectancy rows
+    le_col = next((c for c in df.columns if "LifeExpectancy" in c and "Both" in c), None)
+    if le_col is None:
+        raise KeyError("Life-expectancy (Both Sexes) column not found")
+    bad = df[le_col].isna() | (df[le_col] < 40) | (df[le_col] > 100) | (df[le_col] < 0)
+    if bad.any():
+        print(f"   – Dropped {int(bad.sum())} row(s) with invalid life expectancy")
+    df = df.loc[~bad].copy()
+
+    mism = df.loc[df["Country_raw"] != df["Country"], ["Country_raw", "Country"]]
+    if not mism.empty:
+        NAME_MISMATCH.parent.mkdir(parents=True, exist_ok=True)
+        mism.to_csv(NAME_MISMATCH, index=False, header=["Original", "Canonical"])
+        print(f"   – Logged {len(mism)} name correction(s) → {NAME_MISMATCH.name}")
+
+    name_map = dict(zip(df["Country_raw"], df["Country"], strict=False))
+
+    df = df.drop(columns="Country_raw")
+
+    # Remove collisions like "Micronesia" appearing twice
+    df = df.drop_duplicates(subset=["Country"], keep="first")
+
+    # Now set the index
+    df = df.set_index("Country").sort_index()
+    DEMOG_CLEAN.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(DEMOG_CLEAN)
+    print(f"   – Saved cleaned demographics → {DEMOG_CLEAN.name}\n")
+    return df, name_map
+
+
+# ────────────────────────────────────────────────────────────────────────────────
+# 4 .2  GDP per capita
+# ────────────────────────────────────────────────────────────────────────────────
+def clean_gdp(name_map: Dict[str, str]) -> pd.DataFrame:
+    print("▶ Cleaning GDP …")
+    df = pd.read_csv(GDP_INPUT)
+
+    df = _drop_non_country_rows(df)
+    df["Country"] = _normalise_country_series(df["Country"])
+
+    # numeric coercion
     df[GDP_COL] = (
         df[GDP_COL]
         .astype(str)
-        .str.replace(r"[^0-9.\-]", "", regex=True)  # keep digits/dot/minus
-        .replace("", pd.NA)  # empty strings → NA
+        .str.replace(r"[^\d.\-]", "", regex=True)
+        .replace("", pd.NA)
         .astype(float)
     )
 
-    # 3. Drop & log missing GDP rows
-    missing_mask = df[GDP_COL].isna()
-    if missing_mask.any():
-        output_dropped_path.parent.mkdir(parents=True, exist_ok=True)
-        df.loc[missing_mask].to_csv(output_dropped_path, index=False)
-    df = df.loc[~missing_mask]
+    # b) drop & log missing
+    missing = df[GDP_COL].isna()
+    if missing.any():
+        GDP_DROPPED.parent.mkdir(parents=True, exist_ok=True)
+        df.loc[missing].to_csv(GDP_DROPPED, index=False)
+        print(f"   – Logged {missing.sum()} row(s) with missing GDP → {GDP_DROPPED.name}")
+    df = df.loc[~missing]
 
-    # 4. Harmonise country names
-    if country_name_mapping:
-        df["Country"] = df["Country"].replace(country_name_mapping)
-
-    # 5. Detect Tukey outliers (NOT dropped)
+    # c) Tukey outliers (raw values)
     q1, q3 = df[GDP_COL].quantile([0.25, 0.75])
     iqr = q3 - q1
-    lower, upper = q1 - 1.5 * iqr, q3 + 1.5 * iqr
-    outlier_count = int(((df[GDP_COL] < lower) | (df[GDP_COL] > upper)).sum())
-    print(f"Tukey outlier count (not removed): {outlier_count}")
+    lo, hi = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+    outliers = ((df[GDP_COL] < lo) | (df[GDP_COL] > hi)).sum()
+    print(f"   – Tukey outliers (kept): {int(outliers)}")
 
-    # 6. Deduplicate
+    # d) duplicates
     if df.duplicated("Country").any():
-        if duplicate_policy == "first":
-            df = df.drop_duplicates("Country", keep="first")
-        elif duplicate_policy == "last":
-            df = df.drop_duplicates("Country", keep="last")
-        elif duplicate_policy == "mean":
-            df = (
-                df.groupby("Country", as_index=False)[GDP_COL]
-                .mean(numeric_only=True)
-                .sort_values("Country")
-            )
-        else:
-            raise ValueError(f"Unknown duplicate_policy '{duplicate_policy}'")  # noqa: TRY003
+        df = df.drop_duplicates("Country", keep="first")
+        print("   – Dropped duplicate country rows (kept first)")
 
-    # 7. Set index and write out
+    # e) apply mapping
+    df["Country"] = df["Country"].replace(name_map)
+
     df = df.set_index("Country").sort_index()
-
-    output_clean_path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(output_clean_path)
-
+    GDP_CLEAN.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(GDP_CLEAN)
+    print(f"   – Saved cleaned GDP → {GDP_CLEAN.name}\n")
     return df
 
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser("""Clean GDP‑per‑capita dataset""")
-    parser.add_argument(
-        "--input",
-        required=True,
-        type=Path,
-        help="Raw GDP per capita CSV (must contain 'Country' & GDP column)"
+# ────────────────────────────────────────────────────────────────────────────────
+# 4 .3  Population
+# ────────────────────────────────────────────────────────────────────────────────
+def clean_population(name_map: Dict[str, str]) -> pd.DataFrame:
+    print("▶ Cleaning population …")
+    df = pd.read_csv(POP_INPUT)
+
+    df = _drop_non_country_rows(df)
+    df["Country"] = _normalise_country_series(df["Country"])
+
+    # a) make sure we know which column holds population numbers
+    pop_col = "Population"
+    if pop_col not in df.columns:
+        # fallback – first column that starts with "pop"
+        cand = next((c for c in df.columns if c.lower().startswith("pop")), None)
+        if cand is None:
+            raise KeyError("Population column not found in CSV")
+        pop_col = cand
+
+    # numeric coercion (keep digits only, then to float)
+    df[pop_col] = (
+        df[pop_col]
+        .astype(str)
+        .str.replace(r"[^\d]", "", regex=True)  # strip non-digits
+        .replace("", np.nan)  # empty → NaN
+        .astype(float)
     )
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=Path("output"),
-        help="Directory for cleaned & dropped CSVs (default: ./output)"
-    )
-    parser.add_argument(
-        "--name-map",
-        type=Path,
-        help="Optional CSV with two columns: raw,canonical – for country name mapping"
-    )
-    parser.add_argument(
-        "--duplicate-policy",
-        choices=["first", "last", "mean"],
-        default="first",
-        help="How to resolve duplicate country entries (default: first)"
-    )
-    return parser.parse_args()
+
+    # b) drop & log missing
+    missing_mask = df[pop_col].isna()
+    dropped = int(missing_mask.sum())
+    print(f"   – Dropped {dropped} row(s) with missing population data")
+    if dropped:
+        POP_DROPPED.parent.mkdir(parents=True, exist_ok=True)
+        df.loc[missing_mask].to_csv(POP_DROPPED, index=False)
+    df = df.loc[~missing_mask].copy()
+
+    # c) log-10 transform → Tukey outlier detection
+    log_pop = np.log10(df[pop_col])
+    q1, q3 = log_pop.quantile([0.25, 0.75])
+    iqr = q3 - q1
+    lower, upper = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+    outlier_cnt = int(((log_pop < lower) | (log_pop > upper)).sum())
+    print(f"   – Tukey outliers after log10 (kept): {outlier_cnt}")
+
+    # d) duplicates + name harmonisation
+    if df.duplicated("Country").any():
+        df = df.drop_duplicates("Country", keep="first")
+        print("   – Dropped duplicate country rows (kept first)")
+    df["Country"] = df["Country"].replace(name_map)
+
+    # e) set index & save
+    df = df.set_index("Country").sort_index()
+    POP_CLEAN.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(POP_CLEAN)
+    print(f"   – Saved cleaned population → {POP_CLEAN.name}\n")
+    return df
 
 
-def load_name_mapping(map_path: Path | None) -> dict[str, str] | None:
-    if map_path is None:
-        return None
-    df_map = pd.read_csv(map_path, header=None, names=["raw", "canonical"])
-    return dict(zip(df_map["raw"], df_map["canonical"], strict=False))
+def check_name_matches(
+    demo_df: pd.DataFrame,
+    gdp_df: pd.DataFrame,
+    pop_df: pd.DataFrame
+) -> None:
+    """
+    Prints counts of matching country names between the three cleaned datasets.
+    """
+    demo_set = set(demo_df.index)
+    gdp_set  = set(gdp_df.index)
+    pop_set  = set(pop_df.index)
+
+    demo_gdp = demo_set & gdp_set
+    demo_pop = demo_set & pop_set
+    gdp_pop  = gdp_set & pop_set
+    all_three = demo_set & gdp_set & pop_set
+
+    print("🔍 Name‐match summary:")
+    print(f" • Demographics ∩ GDP             : {len(demo_gdp)} / {len(demo_set)}")
+    print(f" • Demographics ∩ Population      : {len(demo_pop)} / {len(demo_set)}")
+    print(f" • GDP ∩ Population               : {len(gdp_pop)} / {len(gdp_set)}")
+    print(f" • Intersection of all three      : {len(all_three)}")
+    print()
+    print("  (Missing in GDP:     ", sorted(demo_set - gdp_set), ")")
+    print("  (Missing in Pop:     ", sorted(demo_set - pop_set), ")")
+    print("  (In GDP not in demo: ", sorted(gdp_set - demo_set), ")")
+    print("  (In Pop not in demo: ", sorted(pop_set - demo_set), ")")
 
 
+# ────────────────────────────────────────────────────────────────────────────────
+# Pipeline
+# ────────────────────────────────────────────────────────────────────────────────
 def main() -> None:
-    args = parse_args()
+    demo_df, mapping = clean_demographics()
+    gdp_df     = clean_gdp(mapping)
+    pop_df     = clean_population(mapping)
 
-    mapping = load_name_mapping(args.name_map)
+    check_name_matches(demo_df, gdp_df, pop_df)
+    print("✅ All three datasets cleaned and name‐match checked.")
 
-    clean_gdp(
-        input_path=args.input,
-        output_clean_path=args.output_dir / "cleaned_gdp.csv",
-        output_dropped_path=args.output_dir / "dropped_gdp.csv",
-        country_name_mapping=mapping,
-        duplicate_policy=args.duplicate_policy,
-    )
 
 
 if __name__ == "__main__":
