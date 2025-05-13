@@ -21,30 +21,24 @@ import re
 import numpy as np
 import pandas as pd
 
-# ────────────────────────────────────────────────────────────────────────────────
-# Hard-coded paths  (edit BASE if your folder moves)
-# ────────────────────────────────────────────────────────────────────────────────
-BASE = Path(r"C:\Josh\Hebrew University\Year2\Intro To Data Science\Exercises\intro_to_ds_ex1")
+BASE = Path(r"output")
 
-DEMOG_INPUT = BASE / r"output\demographics_data.csv"
-GDP_INPUT = BASE / "gdp_per_capita_2021.csv"
-POP_INPUT = BASE / "population_2021.csv"  # ← new
+DEMOG_INPUT = BASE / "demographics_data.csv"
+GDP_INPUT = "gdp_per_capita_2021.csv"
+POP_INPUT = "population_2021.csv"
 
-DEMOG_CLEAN = BASE / r"output\cleaned_demographics.csv"
-GDP_CLEAN = BASE / r"output\cleaned_gdp.csv"
-POP_CLEAN = BASE / r"output\cleaned_population.csv"  # ← new
+DEMOG_CLEAN = BASE / r"cleaned_demographics.csv"
+GDP_CLEAN = BASE / r"cleaned_gdp.csv"
+POP_CLEAN = BASE / r"cleaned_population.csv"
 
-GDP_DROPPED = BASE / r"output\dropped_gdp.csv"
-POP_DROPPED = BASE / r"output\dropped_population.csv"  # ← new
-NAME_MISMATCH = BASE / r"output\name_mismatches.csv"
+GDP_DROPPED = BASE / "dropped_gdp.csv"
+POP_DROPPED = BASE / "dropped_population.csv"  # ← new
+NAME_MISMATCH = BASE / "name_mismatches.csv"
 
 GDP_COL = "GDP_per_capita_PPP"
 POP_COL = "Population"  # ← expected column name
 
 
-# ────────────────────────────────────────────────────────────────────────────────
-# Utility helpers
-# ────────────────────────────────────────────────────────────────────────────────
 def _numericise(df: pd.DataFrame, cols: Tuple[str, ...]) -> None:
     """Convert listed columns to float in-place, coercing errors to NaN."""
     for c in cols:
@@ -52,9 +46,6 @@ def _numericise(df: pd.DataFrame, cols: Tuple[str, ...]) -> None:
             df[c] = pd.to_numeric(df[c].astype(str).str.replace(",", ""), errors="coerce")
 
 
-# ────────────────────────────────────────────────────────────────────────────────
-# Country-name normalisation & row-filter helper
-# ────────────────────────────────────────────────────────────────────────────────
 _SPECIAL_REPLACEMENTS: dict[str, str] = {
     # spelling / synonym fixes so GDP & POP match Demographics
     "Cape Verde": "Cabo Verde",
@@ -122,32 +113,42 @@ def coerce_numeric(df: pd.DataFrame, col: str, strip_regex: str) -> pd.DataFrame
 
 
 def drop_and_log_missing(
-    df: pd.DataFrame,
-    col: str,
-    drop_path: Path,
-    label: str
+        df: pd.DataFrame,
+        col: str,
+        drop_path: Path,
+        label: str
 ) -> pd.DataFrame:
-    """Remove rows where df[col] is NaN, write them to drop_path, and print count."""
+    """Remove rows where df[col] is NaN, write them to drop_path (even if empty),
+    and print count."""
     mask = df[col].isna()
+    # ensure the output folder exists
+    drop_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # write out whichever rows are “missing” (zero-row DataFrame still writes headers)
+    df.loc[mask].to_csv(drop_path, index=False)
+
     count = int(mask.sum())
     if count:
-        df.loc[mask].to_csv(drop_path, index=False)
         print(f"   – Dropped {count} missing-{label} rows → {drop_path.name}")
+    else:
+        print(f"   – No missing-{label} rows; created empty → {drop_path.name}")
+
+    # return the rows that were not NaN
     return df.loc[~mask].copy()
 
 
 def report_outliers(
-    df: pd.DataFrame,
-    col: str,
-    transform: Callable[[pd.Series], pd.Series],
-    label: str
+        df: pd.DataFrame,
+        col: str,
+        transform: Callable[[pd.Series], pd.Series],
+        label: str
 ) -> None:
     """Compute Tukey fences on transform(df[col]) and print how many fall outside."""
     data = transform(df[col])
-    q1, q3 = data.quantile([0.25,0.75])
-    iqr   = q3 - q1
-    lower, upper = q1 - 1.5*iqr, q3 + 1.5*iqr
-    outlier_count = int(((data < lower)|(data > upper)).sum())
+    q1, q3 = data.quantile([0.25, 0.75])
+    iqr = q3 - q1
+    lower, upper = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+    outlier_count = int(((data < lower) | (data > upper)).sum())
     print(f"   – {label} outliers (kept): {outlier_count}")
 
 
@@ -160,7 +161,7 @@ def dedupe_countries(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def apply_name_map(df: pd.DataFrame, name_map: Dict[str,str]) -> pd.DataFrame:
+def apply_name_map(df: pd.DataFrame, name_map: Dict[str, str]) -> pd.DataFrame:
     """Overwrite df['Country'] where name_map has a key."""
     df["Country"] = df["Country"].replace(name_map)
     return df
@@ -172,7 +173,20 @@ def save_df(df: pd.DataFrame, path: Path, index: bool = True) -> None:
     df.to_csv(path, index=index)
     print(f"   – Saved → {path.name}")
 
+
 def clean_demographics() -> Tuple[pd.DataFrame, Dict[str, str]]:
+    """
+    Cleans the raw demographics data:
+      1. Reads the input CSV.
+      2. Converts all non-Country columns to numeric.
+      3. Drops continent/income/‘World’ rows.
+      4. Normalises country names and logs any mismatches.
+      5. Removes rows with invalid life-expectancy values.
+      6. Deduplicates, sets Country as index, saves to cleaned_demographics.csv.
+    Returns:
+      - cleaned DataFrame (indexed by Country)
+      - name_map dict from original → canonical country name
+    """
     print("Cleaning demographics …")
     df = pd.read_csv(DEMOG_INPUT)
 
@@ -217,7 +231,16 @@ def clean_demographics() -> Tuple[pd.DataFrame, Dict[str, str]]:
     return df, name_map
 
 
-def clean_gdp(name_map: Dict[str,str]) -> pd.DataFrame:
+def clean_gdp(name_map: Dict[str, str]) -> pd.DataFrame:
+    """
+    Cleans the GDP per-capita dataset:
+      1. Reads the raw CSV.
+      2. Drops non-country rows and normalises country names.
+      3. Converts the GDP column to float.
+      4. Logs & removes any missing-GDP rows (always writes dropped_gdp.csv).
+      5. Reports Tukey outliers, deduplicates, applies the demographics name_map.
+      6. Sets Country as index, saves to cleaned_gdp.csv, and returns the DataFrame.
+    """
     df = pd.read_csv(GDP_INPUT)
     print("GDP:")
     df = _drop_non_country_rows(df)
@@ -232,7 +255,16 @@ def clean_gdp(name_map: Dict[str,str]) -> pd.DataFrame:
     return df
 
 
-def clean_population(name_map: Dict[str,str]) -> pd.DataFrame:
+def clean_population(name_map: Dict[str, str]) -> pd.DataFrame:
+    """
+    Cleans the Population dataset:
+      1. Reads the raw CSV.
+      2. Drops non-country rows and normalises country names.
+      3. Converts the Population column to numeric.
+      4. Logs & removes any missing-Population rows (always writes dropped_population.csv).
+      5. Reports Tukey outliers on log10 scale, deduplicates, applies the demographics name_map.
+      6. Sets Country as index, saves to cleaned_population.csv, and returns the DataFrame.
+    """
     df = pd.read_csv(POP_INPUT)
     print("Population:")
     df = _drop_non_country_rows(df)
@@ -276,9 +308,6 @@ def check_name_matches(
     print("  (In Pop not in demo: ", sorted(pop_set - demo_set), ")")
 
 
-# ────────────────────────────────────────────────────────────────────────────────
-# Pipeline
-# ────────────────────────────────────────────────────────────────────────────────
 def main() -> None:
     demo_df, mapping = clean_demographics()
     gdp_df = clean_gdp(mapping)
