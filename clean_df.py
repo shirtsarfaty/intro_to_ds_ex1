@@ -17,7 +17,7 @@ Run:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Callable
 import re
 import numpy as np
 import pandas as pd
@@ -111,11 +111,74 @@ def _drop_non_country_rows(df: pd.DataFrame) -> pd.DataFrame:
     return df.loc[~mask_bad].copy()
 
 
+def coerce_numeric(df: pd.DataFrame, col: str, strip_regex: str) -> pd.DataFrame:
+    """Remove unwanted chars via strip_regex, then to float (NaN on errors)."""
+    df[col] = (
+        df[col].astype(str)
+        .str.replace(strip_regex, "", regex=True)
+        .replace("", pd.NA)
+        .astype(float)
+    )
+    return df
+
+
+def drop_and_log_missing(
+    df: pd.DataFrame,
+    col: str,
+    drop_path: Path,
+    label: str
+) -> pd.DataFrame:
+    """Remove rows where df[col] is NaN, write them to drop_path, and print count."""
+    mask = df[col].isna()
+    count = int(mask.sum())
+    if count:
+        df.loc[mask].to_csv(drop_path, index=False)
+        print(f"   – Dropped {count} missing-{label} rows → {drop_path.name}")
+    return df.loc[~mask].copy()
+
+
+def report_outliers(
+    df: pd.DataFrame,
+    col: str,
+    transform: Callable[[pd.Series], pd.Series],
+    label: str
+) -> None:
+    """Compute Tukey fences on transform(df[col]) and print how many fall outside."""
+    data = transform(df[col])
+    q1, q3 = data.quantile([0.25,0.75])
+    iqr   = q3 - q1
+    lower, upper = q1 - 1.5*iqr, q3 + 1.5*iqr
+    outlier_count = int(((data < lower)|(data > upper)).sum())
+    print(f"   – {label} outliers (kept): {outlier_count}")
+
+
+def dedupe_countries(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep only the first row for each country."""
+    dupes = df.duplicated("Country")
+    if dupes.any():
+        print(f"   – Removing {int(dupes.sum())} duplicate country rows")
+        df = df.drop_duplicates("Country", keep="first")
+    return df
+
+
+def apply_name_map(df: pd.DataFrame, name_map: Dict[str,str]) -> pd.DataFrame:
+    """Overwrite df['Country'] where name_map has a key."""
+    df["Country"] = df["Country"].replace(name_map)
+    return df
+
+
+def save_df(df: pd.DataFrame, path: Path, index: bool = True) -> None:
+    """Ensure parent exists, write to CSV."""
+    path.parent.mkdir(exist_ok=True, parents=True)
+    df.to_csv(path, index=index)
+    print(f"   – Saved → {path.name}")
+
+
 # ────────────────────────────────────────────────────────────────────────────────
 # 4 .1  Demographics
 # ────────────────────────────────────────────────────────────────────────────────
 def clean_demographics() -> Tuple[pd.DataFrame, Dict[str, str]]:
-    print("▶ Cleaning demographics …")
+    print("Cleaning demographics …")
     df = pd.read_csv(DEMOG_INPUT)
 
     # numeric columns
@@ -159,132 +222,54 @@ def clean_demographics() -> Tuple[pd.DataFrame, Dict[str, str]]:
     return df, name_map
 
 
-# ────────────────────────────────────────────────────────────────────────────────
-# 4 .2  GDP per capita
-# ────────────────────────────────────────────────────────────────────────────────
-def clean_gdp(name_map: Dict[str, str]) -> pd.DataFrame:
-    print("▶ Cleaning GDP …")
+def clean_gdp(name_map: Dict[str,str]) -> pd.DataFrame:
     df = pd.read_csv(GDP_INPUT)
-
+    print("GDP:")
     df = _drop_non_country_rows(df)
     df["Country"] = _normalise_country_series(df["Country"])
-
-    # numeric coercion
-    df[GDP_COL] = (
-        df[GDP_COL]
-        .astype(str)
-        .str.replace(r"[^\d.\-]", "", regex=True)
-        .replace("", pd.NA)
-        .astype(float)
-    )
-
-    # b) drop & log missing
-    missing = df[GDP_COL].isna()
-    if missing.any():
-        GDP_DROPPED.parent.mkdir(parents=True, exist_ok=True)
-        df.loc[missing].to_csv(GDP_DROPPED, index=False)
-        print(f"   – Logged {missing.sum()} row(s) with missing GDP → {GDP_DROPPED.name}")
-    df = df.loc[~missing]
-
-    # c) Tukey outliers (raw values)
-    q1, q3 = df[GDP_COL].quantile([0.25, 0.75])
-    iqr = q3 - q1
-    lo, hi = q1 - 1.5 * iqr, q3 + 1.5 * iqr
-    outliers = ((df[GDP_COL] < lo) | (df[GDP_COL] > hi)).sum()
-    print(f"   – Tukey outliers (kept): {int(outliers)}")
-
-    # d) duplicates
-    if df.duplicated("Country").any():
-        df = df.drop_duplicates("Country", keep="first")
-        print("   – Dropped duplicate country rows (kept first)")
-
-    # e) apply mapping
-    df["Country"] = df["Country"].replace(name_map)
-
+    df = coerce_numeric(df, GDP_COL, r"[^\d\.\-]")
+    df = drop_and_log_missing(df, GDP_COL, GDP_DROPPED, "GDP")
+    report_outliers(df, GDP_COL, lambda s: s, "GDP")
+    df = dedupe_countries(df)
+    df = apply_name_map(df, name_map)
     df = df.set_index("Country").sort_index()
-    GDP_CLEAN.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(GDP_CLEAN)
-    print(f"   – Saved cleaned GDP → {GDP_CLEAN.name}\n")
+    save_df(df, GDP_CLEAN)
     return df
 
 
-# ────────────────────────────────────────────────────────────────────────────────
-# 4 .3  Population
-# ────────────────────────────────────────────────────────────────────────────────
-def clean_population(name_map: Dict[str, str]) -> pd.DataFrame:
-    print("▶ Cleaning population …")
+def clean_population(name_map: Dict[str,str]) -> pd.DataFrame:
     df = pd.read_csv(POP_INPUT)
-
+    print("Population:")
     df = _drop_non_country_rows(df)
     df["Country"] = _normalise_country_series(df["Country"])
-
-    # a) make sure we know which column holds population numbers
-    pop_col = "Population"
-    if pop_col not in df.columns:
-        # fallback – first column that starts with "pop"
-        cand = next((c for c in df.columns if c.lower().startswith("pop")), None)
-        if cand is None:
-            raise KeyError("Population column not found in CSV")
-        pop_col = cand
-
-    # numeric coercion (keep digits only, then to float)
-    df[pop_col] = (
-        df[pop_col]
-        .astype(str)
-        .str.replace(r"[^\d]", "", regex=True)  # strip non-digits
-        .replace("", np.nan)  # empty → NaN
-        .astype(float)
-    )
-
-    # b) drop & log missing
-    missing_mask = df[pop_col].isna()
-    dropped = int(missing_mask.sum())
-    print(f"   – Dropped {dropped} row(s) with missing population data")
-    if dropped:
-        POP_DROPPED.parent.mkdir(parents=True, exist_ok=True)
-        df.loc[missing_mask].to_csv(POP_DROPPED, index=False)
-    df = df.loc[~missing_mask].copy()
-
-    # c) log-10 transform → Tukey outlier detection
-    log_pop = np.log10(df[pop_col])
-    q1, q3 = log_pop.quantile([0.25, 0.75])
-    iqr = q3 - q1
-    lower, upper = q1 - 1.5 * iqr, q3 + 1.5 * iqr
-    outlier_cnt = int(((log_pop < lower) | (log_pop > upper)).sum())
-    print(f"   – Tukey outliers after log10 (kept): {outlier_cnt}")
-
-    # d) duplicates + name harmonisation
-    if df.duplicated("Country").any():
-        df = df.drop_duplicates("Country", keep="first")
-        print("   – Dropped duplicate country rows (kept first)")
-    df["Country"] = df["Country"].replace(name_map)
-
-    # e) set index & save
+    df = coerce_numeric(df, POP_COL, r"[^\d]")
+    df = drop_and_log_missing(df, POP_COL, POP_DROPPED, "Population")
+    report_outliers(df, POP_COL, np.log10, "Population")
+    df = dedupe_countries(df)
+    df = apply_name_map(df, name_map)
     df = df.set_index("Country").sort_index()
-    POP_CLEAN.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(POP_CLEAN)
-    print(f"   – Saved cleaned population → {POP_CLEAN.name}\n")
+    save_df(df, POP_CLEAN)
     return df
 
 
 def check_name_matches(
-    demo_df: pd.DataFrame,
-    gdp_df: pd.DataFrame,
-    pop_df: pd.DataFrame
+        demo_df: pd.DataFrame,
+        gdp_df: pd.DataFrame,
+        pop_df: pd.DataFrame
 ) -> None:
     """
     Prints counts of matching country names between the three cleaned datasets.
     """
     demo_set = set(demo_df.index)
-    gdp_set  = set(gdp_df.index)
-    pop_set  = set(pop_df.index)
+    gdp_set = set(gdp_df.index)
+    pop_set = set(pop_df.index)
 
     demo_gdp = demo_set & gdp_set
     demo_pop = demo_set & pop_set
-    gdp_pop  = gdp_set & pop_set
+    gdp_pop = gdp_set & pop_set
     all_three = demo_set & gdp_set & pop_set
 
-    print("🔍 Name‐match summary:")
+    print("Name‐match summary:")
     print(f" • Demographics ∩ GDP             : {len(demo_gdp)} / {len(demo_set)}")
     print(f" • Demographics ∩ Population      : {len(demo_pop)} / {len(demo_set)}")
     print(f" • GDP ∩ Population               : {len(gdp_pop)} / {len(gdp_set)}")
@@ -301,12 +286,11 @@ def check_name_matches(
 # ────────────────────────────────────────────────────────────────────────────────
 def main() -> None:
     demo_df, mapping = clean_demographics()
-    gdp_df     = clean_gdp(mapping)
-    pop_df     = clean_population(mapping)
+    gdp_df = clean_gdp(mapping)
+    pop_df = clean_population(mapping)
 
     check_name_matches(demo_df, gdp_df, pop_df)
-    print("✅ All three datasets cleaned and name‐match checked.")
-
+    print("All three datasets cleaned and name‐match checked.")
 
 
 if __name__ == "__main__":
