@@ -109,4 +109,14 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    #main()
+    DEMOG_CLEAN = "output/demographics_data.csv"
+
+    # טוען את הנתונים
+    df = pd.read_csv(DEMOG_CLEAN, index_col="Country")
+
+    # חישוב הקורלציה בין LifeExpectancy_Both ו-PopulationDensity
+    correlation = df["LifeExpectancy_Both"].corr(df["PopulationDensity"])
+
+    # הצגת התוצאה
+    print(f"Pearson correlation between LifeExpectancy_Both and PopulationDensity: {correlation}")
