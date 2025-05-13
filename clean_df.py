@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 clean_pipeline.py
 =================
@@ -173,10 +172,6 @@ def save_df(df: pd.DataFrame, path: Path, index: bool = True) -> None:
     df.to_csv(path, index=index)
     print(f"   – Saved → {path.name}")
 
-
-# ────────────────────────────────────────────────────────────────────────────────
-# 4 .1  Demographics
-# ────────────────────────────────────────────────────────────────────────────────
 def clean_demographics() -> Tuple[pd.DataFrame, Dict[str, str]]:
     print("Cleaning demographics …")
     df = pd.read_csv(DEMOG_INPUT)

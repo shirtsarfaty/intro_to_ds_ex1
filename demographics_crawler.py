@@ -121,11 +121,11 @@ def extract_country_data(url: str, session, index: int = None, total: int = None
 
     return {
         "Country": country_name,
-        "LifeExpectancy Both": le_both,
-        "LifeExpectancy Female": le_female,
-        "LifeExpectancy Male": le_male,
-        "UrbanPopulation Percentage": urban_pct,
-        "UrbanPopulation Absolute": urban_abs,
+        "LifeExpectancy_Both": le_both,
+        "LifeExpectancy_Female": le_female,
+        "LifeExpectancy_Male": le_male,
+        "UrbanPopulation_Percentage": urban_pct,
+        "UrbanPopulation_Absolute": urban_abs,
         "PopulationDensity": pop_density
     }
 
