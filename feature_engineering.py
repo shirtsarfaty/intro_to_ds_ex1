@@ -1,6 +1,5 @@
 """
 feature_engineering.py
-======================
 Part 3 of the project.
 
 Reads:
@@ -18,7 +17,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-BASE = Path(r"C:\Josh\Hebrew University\Year2\Intro To Data Science\Exercises\intro_to_ds_ex1\output")
+BASE = Path(r"output")
 DEMOG_CLEAN = BASE / "cleaned_demographics.csv"
 GDP_CLEAN = BASE / "cleaned_gdp.csv"
 POP_CLEAN = BASE / "cleaned_population.csv"
